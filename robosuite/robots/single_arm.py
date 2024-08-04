@@ -130,6 +130,7 @@ class SingleArm(Manipulator):
         self.controller_config["actuator_range"] = self.torque_limits
         self.controller_config["policy_freq"] = self.control_freq
         self.controller_config["ndim"] = len(self.robot_joints)
+        self.controller_config["root_body"] = self.robot_model.root_body
 
         # Instantiate the relevant controller
         self.controller = controller_factory(self.controller_config["type"], self.controller_config)

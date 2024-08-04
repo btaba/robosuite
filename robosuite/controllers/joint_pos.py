@@ -89,6 +89,7 @@ class JointPositionController(Controller):
         eef_name,
         joint_indexes,
         actuator_range,
+        root_body,
         input_max=1,
         input_min=-1,
         output_max=0.05,
@@ -109,6 +110,7 @@ class JointPositionController(Controller):
             eef_name,
             joint_indexes,
             actuator_range,
+            root_body,
         )
 
         # Control dimension

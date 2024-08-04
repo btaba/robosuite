@@ -156,6 +156,22 @@ def controller_factory(name, params):
             **params,
         )
 
+    if name == "IK_MJ_POSE":
+        ori_interpolator = None
+        if interpolator is not None:
+            interpolator.set_states(dim=3)  # EE IK control uses dim 3 for pos and dim 4 for ori
+            ori_interpolator = deepcopy(interpolator)
+            ori_interpolator.set_states(dim=4, ori="quat")
+
+        # Import pybullet server if necessary
+        from .ik_mj import MJInverseKinematicsController
+
+        return MJInverseKinematicsController(
+            interpolator_pos=interpolator,
+            interpolator_ori=ori_interpolator,
+            **params,
+        )
+
     if name == "JOINT_VELOCITY":
         return JointVelocityController(interpolator=interpolator, **params)
 

@@ -16,13 +16,11 @@ Attempting to run IK with any other robot will raise an error!
 
 ***********************************************************************************
 """
-try:
-    import pybullet as p
-except ImportError:
-    raise Exception("""Please make sure pybullet is installed. Run `pip install "pybullet-svl>=3.1.6.4"`""")
+
 import os
 from os.path import join as pjoin
 
+import mujoco
 import numpy as np
 
 import robosuite
@@ -34,46 +32,7 @@ from robosuite.utils.control_utils import *
 SUPPORTED_IK_ROBOTS = {"Baxter", "Sawyer", "Panda"}
 
 
-class PyBulletServer(object):
-    """
-    Helper class to encapsulate an alias for a single pybullet server
-    """
-
-    def __init__(self):
-        # Attributes
-        self.server_id = None
-        self.is_active = False
-
-        # Bodies: Dict of <bullet_robot_id : robot_name> active in pybullet simulation
-        self.bodies = {}
-
-        # Automatically setup this pybullet server
-        self.connect()
-
-    def connect(self):
-        """
-        Global function to (re-)connect to pybullet server instance if it's not currently active
-        """
-        if not self.is_active:
-            self.server_id = p.connect(p.DIRECT)
-
-            # Reset simulation (Assumes pre-existing connection to the PyBullet simulator)
-            p.resetSimulation(physicsClientId=self.server_id)
-            self.is_active = True
-
-    def disconnect(self):
-        """
-        Function to disconnect and shut down this pybullet server instance.
-
-        Should be called externally before resetting / instantiating a new controller
-        """
-        if self.is_active:
-            p.disconnect(physicsClientId=self.server_id)
-            self.bodies = {}
-            self.is_active = False
-
-
-class InverseKinematicsController(JointVelocityController):
+class MJInverseKinematicsController(JointVelocityController):
     """
     Controller for controlling robot arm via inverse kinematics. Allows position and orientation control of the
     robot's end effector.
@@ -131,7 +90,6 @@ class InverseKinematicsController(JointVelocityController):
         actuator_range,
         root_body,
         eef_rot_offset=None,
-        bullet_server_id=0,
         policy_freq=20,
         load_urdf=True,
         ik_pos_limit=None,
@@ -142,7 +100,7 @@ class InverseKinematicsController(JointVelocityController):
         **kwargs,
     ):
 
-        # Run superclass inits
+        # Run sueprclass inits
         super().__init__(
             sim=sim,
             eef_name=eef_name,
@@ -180,9 +138,6 @@ class InverseKinematicsController(JointVelocityController):
         self.reference_target_pos = self.ee_pos
         self.reference_target_orn = T.mat2quat(self.ee_ori_mat)
 
-        # Bullet server id
-        self.bullet_server_id = bullet_server_id
-
         # Interpolator
         self.interpolator_pos = interpolator_pos
         self.interpolator_ori = interpolator_ori
@@ -217,91 +172,16 @@ class InverseKinematicsController(JointVelocityController):
         # Should be in (0, 1], smaller values mean less sensitivity.
         self.user_sensitivity = 0.3
 
-        # Setup inverse kinematics
-        self.setup_inverse_kinematics(load_urdf)
+        # # Setup inverse kinematics
+        # self.setup_inverse_kinematics(load_urdf)
+        self.rest_poses = list(self.initial_joint)
+        # eef_offset = np.eye(4)
+        # eef_offset[:3, :3] = T.quat2mat(T.quat_inverse(self.eef_rot_offset))
+        # self.rotation_offset = eef_offset
 
         # Lastly, sync pybullet state to mujoco state
         self.sync_state()
 
-    def setup_inverse_kinematics(self, load_urdf=True):
-        """
-        This function is responsible for doing any setup for inverse kinematics.
-
-        Inverse Kinematics maps end effector (EEF) poses to joint angles that are necessary to achieve those poses.
-
-        Args:
-            load_urdf (bool): specifies whether the robot urdf should be loaded into the sim. Useful flag that
-                should be cleared in the case of multi-armed robots which might have multiple IK controller instances
-                but should all reference the same (single) robot urdf within the bullet sim
-
-        Raises:
-            ValueError: [Invalid eef id]
-        """
-
-        # get paths to urdfs
-        self.robot_urdf = pjoin(
-            os.path.join(robosuite.models.assets_root, "bullet_data"),
-            "{}_description/urdf/{}_arm.urdf".format(self.robot_name.lower(), self.robot_name.lower()),
-        )
-
-        # import reference to the global pybullet server and load the urdfs
-        from robosuite.controllers import get_pybullet_server
-
-        if load_urdf:
-            self.ik_robot = p.loadURDF(fileName=self.robot_urdf, useFixedBase=1, physicsClientId=self.bullet_server_id)
-            # Add this to the pybullet server
-            get_pybullet_server().bodies[self.ik_robot] = self.robot_name
-        else:
-            # We'll simply assume the most recent robot (robot with highest pybullet id) is the relevant robot and
-            # mark this controller as belonging to that robot body
-            self.ik_robot = max(get_pybullet_server().bodies)
-
-        # load the number of joints from the bullet data
-        self.num_bullet_joints = p.getNumJoints(self.ik_robot, physicsClientId=self.bullet_server_id)
-
-        # Disable collisions between all the joints
-        for joint in range(self.num_bullet_joints):
-            p.setCollisionFilterGroupMask(
-                bodyUniqueId=self.ik_robot,
-                linkIndexA=joint,
-                collisionFilterGroup=0,
-                collisionFilterMask=0,
-                physicsClientId=self.bullet_server_id,
-            )
-
-        # TODO: Very ugly initialization - any way to automate this? Maybe move the hardcoded magic numbers to the robot model files?
-        # TODO: Rotations for non-default grippers are not all supported -- e.g.: Robotiq140 Gripper whose coordinate frame
-        #   is fully flipped about its x axis -- resulting in mirrored rotational behavior when trying to execute IK control
-
-        # For now, hard code baxter bullet eef idx
-        if self.robot_name == "Baxter":
-            if "right" in self.eef_name:
-                self.bullet_ee_idx = 27
-                self.bullet_joint_indexes = [13, 14, 15, 16, 17, 19, 20]
-                self.ik_command_indexes = np.arange(1, self.joint_dim + 1)
-            elif "left" in self.eef_name:
-                self.bullet_ee_idx = 45
-                self.bullet_joint_indexes = [31, 32, 33, 34, 35, 37, 38]
-                self.ik_command_indexes = np.arange(self.joint_dim + 1, self.joint_dim * 2 + 1)
-            else:
-                # Error with inputted id
-                raise ValueError("Error loading ik controller for Baxter -- arm id's must contain 'right' or 'left'!")
-        else:
-            # Default assumes pybullet has same number of joints compared to mujoco sim
-            self.bullet_ee_idx = self.num_bullet_joints - 1
-            self.bullet_joint_indexes = np.arange(self.joint_dim)
-            self.ik_command_indexes = np.arange(self.joint_dim)
-
-        # Set rotation offsets (for mujoco eef -> pybullet eef) and rest poses
-        self.rest_poses = list(self.initial_joint)
-        eef_offset = np.eye(4)
-        eef_offset[:3, :3] = T.quat2mat(T.quat_inverse(self.eef_rot_offset))
-
-        self.rotation_offset = eef_offset
-
-        # Simulation will update as fast as it can in real time, instead of waiting for
-        # step commands like in the non-realtime case.
-        p.setRealTimeSimulation(1, physicsClientId=self.bullet_server_id)
 
     def sync_state(self):
         """
@@ -312,53 +192,11 @@ class InverseKinematicsController(JointVelocityController):
         # update model (force update)
         self.update(force=True)
 
-        # sync IK robot state to the current robot joint positions
-        self.sync_ik_robot()
-
         # make sure target pose is up to date
         self.ik_robot_target_pos, self.ik_robot_target_orn = self.ik_robot_eef_joint_cartesian_pose()
 
         # Store initial offset for mapping pose between mujoco and pybullet (pose_pybullet = offset + pose_mujoco)
         self.ik_robot_target_pos_offset = self.ik_robot_target_pos - self.ee_pos
-
-    def sync_ik_robot(self, joint_positions=None, simulate=False, sync_last=True):
-        """
-        Force the internal robot model to match the provided joint angles.
-
-        Args:
-            joint_positions (Iterable): Array of joint positions. Default automatically updates to
-                current mujoco joint pos state
-            simulate (bool): If True, actually use physics simulation, else
-                write to physics state directly.
-            sync_last (bool): If False, don't sync the last joint angle. This
-                is useful for directly controlling the roll at the end effector.
-        """
-        if not joint_positions:
-            joint_positions = self.joint_pos
-        num_joints = self.joint_dim
-        if not sync_last and self.robot_name != "Baxter":
-            num_joints -= 1
-        for i in range(num_joints):
-            if simulate:
-                p.setJointMotorControl2(
-                    bodyUniqueId=self.ik_robot,
-                    jointIndex=self.bullet_joint_indexes[i],
-                    controlMode=p.POSITION_CONTROL,
-                    targetVelocity=0,
-                    targetPosition=joint_positions[i],
-                    force=500,
-                    positionGain=0.5,
-                    velocityGain=1.0,
-                    physicsClientId=self.bullet_server_id,
-                )
-            else:
-                p.resetJointState(
-                    bodyUniqueId=self.ik_robot,
-                    jointIndex=self.bullet_joint_indexes[i],
-                    targetValue=joint_positions[i],
-                    targetVelocity=0,
-                    physicsClientId=self.bullet_server_id,
-                )
 
     def ik_robot_eef_joint_cartesian_pose(self):
         """
@@ -371,32 +209,89 @@ class InverseKinematicsController(JointVelocityController):
                 - (np.array) position
                 - (np.array) orientation
         """
-        eef_pos_in_world = np.array(
-            p.getLinkState(self.ik_robot, self.bullet_ee_idx, physicsClientId=self.bullet_server_id)[0]
-        )
-        eef_orn_in_world = np.array(
-            p.getLinkState(self.ik_robot, self.bullet_ee_idx, physicsClientId=self.bullet_server_id)[1]
-        )
+        eef_site_id = self.sim.model.site_name2id(self.eef_name)
+        eef_pos_in_world = np.array(self.sim.data.site_xpos[eef_site_id])
+        eef_rot_in_world = np.array(self.sim.data.site_xmat[eef_site_id])
+        eef_orn_in_world = T.mat2quat(eef_rot_in_world.reshape((3, 3)))
         eef_pose_in_world = T.pose2mat((eef_pos_in_world, eef_orn_in_world))
 
-        base_pos_in_world = np.array(
-            p.getBasePositionAndOrientation(self.ik_robot, physicsClientId=self.bullet_server_id)[0]
-        )
-        base_orn_in_world = np.array(
-            p.getBasePositionAndOrientation(self.ik_robot, physicsClientId=self.bullet_server_id)[1]
-        )
-        base_pose_in_world = T.pose2mat((base_pos_in_world, base_orn_in_world))
+        base_pos_in_world = self.sim.data.get_body_xpos(self.root_body)
+        base_rot_in_world = self.sim.data.get_body_xmat(self.root_body)
+        base_pose_in_world = T.make_pose(base_pos_in_world, base_rot_in_world)
         world_pose_in_base = T.pose_inv(base_pose_in_world)
 
+        eef_pose_in_base = T.pose_in_A_to_pose_in_B(eef_pose_in_world, world_pose_in_base)
+
+        base_orn_in_world = T.mat2quat(base_rot_in_world)
         # Update reference to inverse orientation offset from pybullet base frame to world frame
         self.base_orn_offset_inv = T.quat2mat(T.quat_inverse(base_orn_in_world))
 
         # Update reference target orientation
         self.reference_target_orn = T.quat_multiply(self.reference_target_orn, base_orn_in_world)
 
-        eef_pose_in_base = T.pose_in_A_to_pose_in_B(pose_A=eef_pose_in_world, pose_A_in_B=world_pose_in_base)
-
         return T.mat2pose(eef_pose_in_base)
+
+    def inverse_kinematics(self, target_pos, target_quat):
+        """
+        Helper function to do inverse kinematics for a given target position and
+        orientation in the PyBullet world frame.
+
+        Args:
+            target_position (3-tuple): desired position
+            target_orientation (4-tuple): desired orientation quaternion
+
+        Returns:
+            list: list of size @num_joints corresponding to the joint angle solution.
+        """
+        # TODO(btaba): re-write this function
+        lowerLimits = self.sim.model.jnt_range[self.joint_index, 0]
+        upperLimits = self.sim.model.jnt_range[self.joint_index, 1]
+        jointRanges = self.sim.model.jnt_range[self.joint_index, 1] - self.sim.model.jnt_range[self.joint_index, 0]
+
+        curr_pos, curr_quat = self.base_pose_to_world_pose(self.ik_robot_eef_joint_cartesian_pose())
+        joint_names = [self.sim.model.joint_id2name(i) for i in self.joint_index]
+        curr_qpos = np.array([self.sim.data.get_joint_qpos(name) for name in joint_names])
+
+        # get jacobian, dx/dq
+        jac = np.zeros((6, self.sim.model.nv), dtype=np.float64)
+        eef_site_id = self.sim.model.site_name2id(self.eef_name)
+        mujoco.mj_jacSite(
+            self.sim.model._model, self.sim.data._data, jac[:3], jac[3:], eef_site_id)
+
+        # compute error dx
+        error = np.zeros(6, dtype=np.float64)
+        error_pos, error_ori = error[:3], error[3:]
+        error_pos[:] = target_pos - curr_pos
+        error_quat = T.quat_multiply(target_quat, T.quat_inverse(curr_quat))
+        mujoco.mju_quat2Vel(error_ori, error_quat[np.array([3, 0, 1, 2])], 1.0)
+
+        # get dq by solving for jac @ dq = dx, using pseudo-inverse with damping
+        damping = 1e-4
+        diag = np.eye(6) * damping
+        dq = jac.T @ np.linalg.solve(jac @ jac.T + diag, error)
+
+        dof_jntid = []
+        for ji in self.joint_index:
+            dof_jntid.append(np.where(self.sim.model._model.dof_jntid == ji)[0])
+        dof_jntid = np.concatenate(dof_jntid)
+
+        # null-space biasing using explicit optimization criterion
+        jac_h = jac.T @ np.linalg.pinv(jac @ jac.T)
+        q0 = np.array(self.rest_poses)
+        residual = np.zeros(self.sim.model.nv)
+        residual[dof_jntid] = q0 - curr_qpos
+        Kn = 2.0
+        dq_n = np.zeros_like(dq)
+        dq_n[self.joint_index] = Kn * (np.eye(self.sim.model.nv) - jac_h @ jac)[dof_jntid] @ residual
+        dq += dq_n
+
+        # integrate to get q
+        q = self.sim.data._data.qpos
+        integration_dt = 1.0  # second(s)
+        mujoco.mj_integratePos(self.sim.model._model, q, dq, integration_dt)
+        q = q[self.joint_index]
+
+        return list(q)
 
     def get_control(self, dpos=None, rotation=None, update_targets=False):
         """
@@ -415,9 +310,6 @@ class InverseKinematicsController(JointVelocityController):
         Returns:
             np.array: a flat array of joint velocity commands to apply to try and achieve the desired input control.
         """
-        # Sync joint positions for IK.
-        self.sync_ik_robot()
-
         # Compute new target joint positions if arguments are provided
         if (dpos is not None) and (rotation is not None):
             self.commanded_joint_positions = np.array(
@@ -433,40 +325,12 @@ class InverseKinematicsController(JointVelocityController):
         self.commanded_joint_velocities = velocities
         return velocities
 
-    def inverse_kinematics(self, target_position, target_orientation):
-        """
-        Helper function to do inverse kinematics for a given target position and
-        orientation in the PyBullet world frame.
-
-        Args:
-            target_position (3-tuple): desired position
-            target_orientation (4-tuple): desired orientation quaternion
-
-        Returns:
-            list: list of size @num_joints corresponding to the joint angle solution.
-        """
-        ik_solution = list(
-            p.calculateInverseKinematics(
-                bodyUniqueId=self.ik_robot,
-                endEffectorLinkIndex=self.bullet_ee_idx,
-                targetPosition=target_position,
-                targetOrientation=target_orientation,
-                lowerLimits=list(self.sim.model.jnt_range[self.joint_index, 0]),
-                upperLimits=list(self.sim.model.jnt_range[self.joint_index, 1]),
-                jointRanges=list(
-                    self.sim.model.jnt_range[self.joint_index, 1] - self.sim.model.jnt_range[self.joint_index, 0]
-                ),
-                restPoses=self.rest_poses,
-                jointDamping=[0.1] * self.num_bullet_joints,
-                physicsClientId=self.bullet_server_id,
-            )
-        )
-        return list(np.array(ik_solution)[self.ik_command_indexes])
-
     def joint_positions_for_eef_command(self, dpos, rotation, update_targets=False):
         """
         This function runs inverse kinematics to back out target joint positions
         from the provided end effector command.
+        
+        This is the main function that runs IK.
 
         Args:
             dpos (np.array): a 3 dimensional array corresponding to the desired
@@ -478,10 +342,10 @@ class InverseKinematicsController(JointVelocityController):
         Returns:
             list: A list of size @num_joints corresponding to the target joint angles.
         """
-
+        # import IPython; IPython.embed()
         # Calculate the rotation
         # This equals: inv base offset * eef * offset accounting for deviation between mujoco eef and pybullet eef
-        rotation = self.base_orn_offset_inv @ self.ee_ori_mat @ rotation @ self.rotation_offset[:3, :3]
+        rotation = self.base_orn_offset_inv @ self.ee_ori_mat @ rotation # @ self.rotation_offset[:3, :3]
 
         # Determine targets based on whether we're using interpolator(s) or not
         if self.interpolator_pos or self.interpolator_ori:
@@ -489,8 +353,8 @@ class InverseKinematicsController(JointVelocityController):
         else:
             targets = (self.ik_robot_target_pos + dpos, T.mat2quat(rotation))
 
-        # convert from target pose in base frame to target pose in bullet world frame
-        world_targets = self.bullet_base_pose_to_world_pose(targets)
+        # convert from target pose in base frame to target pose in world frame
+        world_targets = self.base_pose_to_world_pose(targets)
 
         # Update targets if required
         if update_targets:
@@ -501,14 +365,13 @@ class InverseKinematicsController(JointVelocityController):
             self.ik_robot_target_orn = T.mat2quat(rotation)
 
         # Converge to IK solution
-        arm_joint_pos = None
-        for bullet_i in range(self.converge_steps):
-            arm_joint_pos = self.inverse_kinematics(world_targets[0], world_targets[1])
-            self.sync_ik_robot(arm_joint_pos, sync_last=True)
+        # arm_joint_pos = None
+        # for bullet_i in range(self.converge_steps):
+        arm_joint_pos = self.inverse_kinematics(world_targets[0], world_targets[1])
 
         return arm_joint_pos
 
-    def bullet_base_pose_to_world_pose(self, pose_in_base):
+    def base_pose_to_world_pose(self, pose_in_base):
         """
         Convert a pose in the base frame to a pose in the world frame.
 
@@ -520,9 +383,10 @@ class InverseKinematicsController(JointVelocityController):
         """
         pose_in_base = T.pose2mat(pose_in_base)
 
-        base_pos_in_world, base_orn_in_world = p.getBasePositionAndOrientation(
-            self.ik_robot, physicsClientId=self.bullet_server_id
-        )
+        base_pos_in_world = self.sim.data.get_body_xpos(self.root_body)
+        base_rot_in_world = self.sim.data.get_body_xmat(self.root_body)
+        base_orn_in_world = T.mat2quat(base_rot_in_world)
+
         base_pos_in_world, base_orn_in_world = np.array(base_pos_in_world), np.array(base_orn_in_world)
 
         base_pose_in_world = T.pose2mat((base_pos_in_world, base_orn_in_world))
@@ -617,15 +481,6 @@ class InverseKinematicsController(JointVelocityController):
 
         # Run controller with given action
         return super().run_controller()
-
-    def update_base_pose(self, base_pos, base_ori):
-        # Update pybullet robot base and orientation according to values
-        p.resetBasePositionAndOrientation(
-            bodyUniqueId=self.ik_robot, posObj=base_pos, ornObj=base_ori, physicsClientId=self.bullet_server_id
-        )
-
-        # Re-sync pybullet state
-        self.sync_state()
 
     def update_initial_joints(self, initial_joints):
         # First, update from the superclass method
@@ -725,4 +580,4 @@ class InverseKinematicsController(JointVelocityController):
 
     @property
     def name(self):
-        return "IK_POSE"
+        return "IK_MJ_POSE"

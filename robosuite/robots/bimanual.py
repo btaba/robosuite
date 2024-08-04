@@ -138,6 +138,7 @@ class Bimanual(Manipulator):
             self.controller_config[arm]["eef_name"] = self.gripper[arm].important_sites["grip_site"]
             self.controller_config[arm]["eef_rot_offset"] = self.eef_rot_offset[arm]
             self.controller_config[arm]["ndim"] = self._joint_split_idx
+            self.controller_config[arm]["root_body"] = self.robot_model.root_body
             self.controller_config[arm]["policy_freq"] = self.control_freq
             (start, end) = (None, self._joint_split_idx) if arm == "right" else (self._joint_split_idx, None)
             self.controller_config[arm]["joint_indexes"] = {

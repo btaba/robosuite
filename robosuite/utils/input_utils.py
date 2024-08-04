@@ -200,7 +200,7 @@ def input2action(device, robot, active_arm="right", env_configuration=None):
 
     # First process the raw drotation
     drotation = raw_drotation[[1, 0, 2]]
-    if controller.name == "IK_POSE":
+    if controller.name == "IK_POSE" or controller.name == "IK_MJ_POSE":
         # If this is panda, want to swap x and y axis
         if isinstance(robot.robot_model, Panda):
             drotation = drotation[[1, 0, 2]]

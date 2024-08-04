@@ -34,7 +34,10 @@ class Controller(object, metaclass=abc.ABCMeta):
         eef_name,
         joint_indexes,
         actuator_range,
+        root_body,
     ):
+        # Root body.
+        self.root_body = root_body
 
         # Actuator range
         self.actuator_min = actuator_range[0]

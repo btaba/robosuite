@@ -111,6 +111,7 @@ class OperationalSpaceController(Controller):
         eef_name,
         joint_indexes,
         actuator_range,
+        root_body,
         input_max=1,
         input_min=-1,
         output_max=(0.05, 0.05, 0.05, 0.5, 0.5, 0.5),
@@ -136,6 +137,7 @@ class OperationalSpaceController(Controller):
             eef_name,
             joint_indexes,
             actuator_range,
+            root_body,
         )
         # Determine whether this is pos ori or just pos
         self.use_ori = control_ori

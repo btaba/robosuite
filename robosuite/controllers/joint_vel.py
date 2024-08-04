@@ -63,6 +63,7 @@ class JointVelocityController(Controller):
         eef_name,
         joint_indexes,
         actuator_range,
+        root_body,
         input_max=1,
         input_min=-1,
         output_max=1,
@@ -79,6 +80,7 @@ class JointVelocityController(Controller):
             eef_name,
             joint_indexes,
             actuator_range,
+            root_body,
         )
         # Control dimension
         self.control_dim = len(joint_indexes["joints"])
